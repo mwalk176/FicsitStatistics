@@ -22,6 +22,7 @@
 #include "FGRecipe.h"
 #include "FicsitStatistics.h"
 #include "FicsitStatisticsConfig.h"
+#include "FicsitGameAccess.h"
 #include "FicsitStatisticsHooks.h"
 #include "Resources/FGExtractableResourceInterface.h"
 #include "Resources/FGItemDescriptor.h"
@@ -376,6 +377,19 @@ void AFicsitStatisticsSubsystem::TakeSample()
 		}
 	}
 
+	// Once per run, before the scans, so it is in the log even if a scan fails: do the reflected reads agree with the game's
+	// inline accessors? A MISMATCH means the game is newer than the headers this mod was built against.
+	static bool bLoggedLayoutCheck = false;
+	if (!bLoggedLayoutCheck && (ManufacturerScratch.Num() > 0 || GeneratorScratch.Num() > 0 || StorageScratch.Num() > 0 || ExtractorScratch.Num() > 0))
+	{
+		bLoggedLayoutCheck = true;
+		FicsitGame::LogLayoutCheck(
+			ManufacturerScratch.IsEmpty() ? nullptr : ManufacturerScratch[0],
+			GeneratorScratch.IsEmpty() ? nullptr : GeneratorScratch[0],
+			StorageScratch.IsEmpty() ? nullptr : StorageScratch[0],
+			ExtractorScratch.IsEmpty() ? nullptr : ExtractorScratch[0]);
+	}
+
 	ScanManufacturers(ManufacturerScratch, Snapshot);
 	ScanExtractors(ExtractorScratch, Snapshot);
 	ScanFuelGenerators(GeneratorScratch, Snapshot);
@@ -493,11 +507,11 @@ void AFicsitStatisticsSubsystem::TakeSample()
 
 EFicsitMachineState AFicsitStatisticsSubsystem::GetMachineState(const AFGBuildableFactory* Factory, bool bNeedsPower)
 {
-	if (Factory->IsProductionPaused())
+	if (FicsitGame::IsProductionPaused(Factory))
 	{
 		return EFicsitMachineState::Paused;
 	}
-	if (bNeedsPower && !Factory->HasPower())
+	if (bNeedsPower && !FicsitGame::HasPower(Factory))
 	{
 		return EFicsitMachineState::Unpowered;
 	}
@@ -508,7 +522,7 @@ void AFicsitStatisticsSubsystem::ScanManufacturers(const TArray<AFGBuildableManu
 {
 	for (const AFGBuildableManufacturer* Manufacturer : Manufacturers)
 	{
-		const TSubclassOf<UFGRecipe> RecipeClass = Manufacturer->GetCurrentRecipe();
+		const TSubclassOf<UFGRecipe> RecipeClass = FicsitGame::CurrentRecipe(Manufacturer);
 		// Cycle time already includes the clock speed (potential).
 		const float CycleTime = Manufacturer->GetProductionCycleTime();
 		if (!RecipeClass || CycleTime <= KINDA_SMALL_NUMBER)
@@ -522,7 +536,7 @@ void AFicsitStatisticsSubsystem::ScanManufacturers(const TArray<AFGBuildableManu
 		const float CyclesPerMinute = 60.f / CycleTime;
 		const float Productivity = State == EFicsitMachineState::Paused ? 0.f : Manufacturer->GetProductivity();
 		// The Somersloop boost only multiplies output (inputs are unchanged).
-		const float OutputBoost = Manufacturer->GetCurrentProductionBoost();
+		const float OutputBoost = FicsitGame::CurrentProductionBoost(Manufacturer);
 
 		const UFGRecipe* Recipe = RecipeClass.GetDefaultObject();
 		// Includes the session's parts-cost multiplier, if the player changed it.
@@ -533,7 +547,7 @@ void AFicsitStatisticsSubsystem::ScanManufacturers(const TArray<AFGBuildableManu
 		ShortScratch.Reset();
 		if (State == EFicsitMachineState::Idle)
 		{
-			if (const UFGInventoryComponent* Input = Manufacturer->GetInputInventory())
+			if (const UFGInventoryComponent* Input = FicsitGame::InputInventory(Manufacturer))
 			{
 				for (const FItemAmount& Ingredient : Ingredients)
 				{
@@ -576,12 +590,7 @@ void AFicsitStatisticsSubsystem::ScanExtractors(const TArray<AFGBuildableResourc
 
 	for (const AFGBuildableResourceExtractor* Extractor : Extractors)
 	{
-		const TScriptInterface<IFGExtractableResourceInterface> Resource = Extractor->GetExtractableResource();
-		if (!Resource.GetInterface())
-		{
-			continue;
-		}
-		const TSubclassOf<UFGItemDescriptor> Item = Resource.GetInterface()->GetResourceClass();
+		const TSubclassOf<UFGItemDescriptor> Item = FicsitGame::ExtractorItem(Extractor);
 		const float CycleTime = Extractor->GetProductionCycleTime();
 		if (!Item || CycleTime <= KINDA_SMALL_NUMBER)
 		{
@@ -638,7 +647,7 @@ TSubclassOf<UFGItemDescriptor> AFicsitStatisticsSubsystem::GetBuildingDescriptor
 		return Cached->Get();
 	}
 	UClass* Descriptor = nullptr;
-	if (const TSubclassOf<UFGRecipe> Recipe = Buildable->GetBuiltWithRecipe())
+	if (const TSubclassOf<UFGRecipe> Recipe = FicsitGame::BuiltWithRecipe(Buildable))
 	{
 		for (const FItemAmount& Product : Recipe.GetDefaultObject()->GetProducts())
 		{
@@ -660,7 +669,7 @@ void AFicsitStatisticsSubsystem::ScanStorage(FFicsitProductionSnapshot& Snapshot
 	FInventoryStack Stack;
 	for (AFGBuildableStorage* Storage : StorageScratch)
 	{
-		const UFGInventoryComponent* Inventory = Storage ? Storage->GetStorageInventory() : nullptr;
+		const UFGInventoryComponent* Inventory = FicsitGame::StorageInventory(Storage);
 		if (!Inventory || Inventory->IsEmpty())
 		{
 			continue;
@@ -706,12 +715,12 @@ void AFicsitStatisticsSubsystem::ScanPower(const TArray<AFGBuildableFactory*>& F
 		if (const AFGBuildablePowerStorage* Battery = Cast<AFGBuildablePowerStorage>(Factory))
 		{
 			Total(EFicsitPowerTotal::BatteryStored) += Battery->GetPowerStore();
-			Total(EFicsitPowerTotal::BatteryCapacity) += Battery->GetPowerStoreCapacity();
+			Total(EFicsitPowerTotal::BatteryCapacity) += FicsitGame::PowerStoreCapacity(Battery);
 			Total(EFicsitPowerTotal::BatteryInput) += Battery->GetPowerInput();
 			Total(EFicsitPowerTotal::BatteryOutput) += Battery->GetPowerOutput();
 			continue;
 		}
-		const UFGPowerInfoComponent* Info = Factory->GetPowerInfo();
+		const UFGPowerInfoComponent* Info = FicsitGame::PowerInfo(Factory);
 		if (!Info)
 		{
 			continue;
@@ -757,19 +766,19 @@ void AFicsitStatisticsSubsystem::ScanPower(const TArray<AFGBuildableFactory*>& F
 	int32 Circuits = 0;
 	if (const AFGCircuitSubsystem* CircuitSubsystem = AFGCircuitSubsystem::GetCircuitSubsystem(this))
 	{
-		for (const auto& Pair : CircuitSubsystem->mCircuits)
+		FicsitGame::ForEachCircuit(CircuitSubsystem, [&](const UFGCircuit* Circuit)
 		{
-			if (const UFGPowerCircuit* Circuit = Cast<UFGPowerCircuit>(Pair.Value))
+			if (const UFGPowerCircuit* PowerCircuit = Cast<UFGPowerCircuit>(Circuit))
 			{
 				FPowerCircuitStats Stats;
-				Circuit->GetStats(Stats);
+				PowerCircuit->GetStats(Stats);
 				CircuitTotals[0] += Stats.PowerProduced;
 				CircuitTotals[1] += Stats.PowerConsumed;
 				CircuitTotals[2] += Stats.PowerProductionCapacity;
 				CircuitTotals[3] += Stats.MaximumPowerConsumption;
 				++Circuits;
 			}
-		}
+		});
 	}
 	LastBuildingPower[0] = Total(EFicsitPowerTotal::Produced);
 	LastBuildingPower[1] = Total(EFicsitPowerTotal::Consumed);
@@ -793,7 +802,7 @@ void AFicsitStatisticsSubsystem::ScanFuelGenerators(const TArray<AFGBuildableGen
 
 	for (const AFGBuildableGeneratorFuel* Generator : Generators)
 	{
-		const TSubclassOf<UFGItemDescriptor> Fuel = Generator->GetCurrentFuelClass();
+		const TSubclassOf<UFGItemDescriptor> Fuel = FicsitGame::CurrentFuelClass(Generator);
 		if (!Fuel)
 		{
 			continue;
@@ -809,13 +818,13 @@ void AFicsitStatisticsSubsystem::ScanFuelGenerators(const TArray<AFGBuildableGen
 
 		const EFicsitMachineState State = GetMachineState(Generator, false);
 		// Generators burn fuel in proportion to the power actually drawn from them.
-		const float Load = State == EFicsitMachineState::Running ? FMath::Clamp(Generator->GetLoadPercentage(), 0.f, 1.f) : 0.f;
+		const float Load = State == EFicsitMachineState::Running ? FMath::Clamp(FicsitGame::LoadPercentage(Generator), 0.f, 1.f) : 0.f;
 
 		// Why an idle generator stopped: out of fuel, out of water, or (nuclear) its waste output is full. Other
 		// generators have no output that can fill, so one that has its inputs just stays idle.
 		const bool bIdle = State == EFicsitMachineState::Idle;
 		const bool bNoFuel = bIdle && !Generator->HasFuel();
-		const bool bNoWater = bIdle && Generator->GetRequiresSupplementalResource() && !Generator->HasSupplementalResource();
+		const bool bNoWater = bIdle && FicsitGame::RequiresSupplementalResource(Generator) && !Generator->HasSupplementalResource();
 		const bool bNuclear = Generator->IsA<AFGBuildableGeneratorNuclear>();
 		auto StateFor = [&](bool bIsShortOfThis)
 		{
@@ -827,9 +836,9 @@ void AFicsitStatisticsSubsystem::ScanFuelGenerators(const TArray<AFGBuildableGen
 		Snapshot.Consumers.FindOrAdd(Fuel).Add(StateFor(bNoFuel));
 
 		// Water for coal and nuclear plants (rates are in m³/s).
-		if (const TSubclassOf<UFGItemDescriptor> Supplemental = Generator->GetSupplementalResourceClass())
+		if (const TSubclassOf<UFGItemDescriptor> Supplemental = FicsitGame::SupplementalResourceClass(Generator))
 		{
-			if (Generator->GetRequiresSupplementalResource())
+			if (FicsitGame::RequiresSupplementalResource(Generator))
 			{
 				const float MaxWater = Generator->GetSupplementalConsumptionRateMaximum() * 60.f;
 				const float ActualWater = State == EFicsitMachineState::Running ? Generator->GetSupplementalConsumptionRateCurrent() * 60.f : 0.f;

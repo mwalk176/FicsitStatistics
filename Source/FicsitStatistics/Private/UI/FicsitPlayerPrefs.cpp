@@ -7,9 +7,32 @@
 #include "Misc/ConfigCacheIni.h"
 #include "Resources/FGItemDescriptor.h"
 #include "UObject/StrongObjectPtr.h"
+#include "UObject/UnrealType.h"
 
 namespace
 {
+	/**
+	 * The session name, read through reflection. AFGGameState::GetSessionName() is an inline accessor, so it is compiled
+	 * into this module with the class layout of the headers it was built against. When the game is a newer build than
+	 * those headers it reads the wrong offset and returns a garbage FString, which crashes on copy. Reflection looks the
+	 * property up in the running game, so it stays correct across builds.
+	 */
+	FString ReadSessionName(const AFGGameState* GameState)
+	{
+		if (!IsValid(GameState))
+		{
+			return FString();
+		}
+		static const FStrProperty* const NameProperty =
+			CastField<FStrProperty>(AFGGameState::StaticClass()->FindPropertyByName(TEXT("mReplicatedSessionName")));
+		if (!NameProperty)
+		{
+			// The property was renamed or removed. An empty name is the same as a client that hasn't received one yet.
+			return FString();
+		}
+		return NameProperty->GetPropertyValue_InContainer(GameState);
+	}
+
 	const TCHAR* ConfigSection = TEXT("FicsitStatistics");
 	const TCHAR* PinsKey = TEXT("PinnedItems");
 
@@ -114,7 +137,7 @@ void FFicsitPins::SetWorld(const UObject* WorldContext)
 	const UWorld* World = GEngine ? GEngine->GetWorldFromContextObject(WorldContext, EGetWorldErrorMode::ReturnNull) : nullptr;
 	const AFGGameState* GameState = World ? World->GetGameState<AFGGameState>() : nullptr;
 	// Empty on a client until the session name replicates. The pins load once it arrives.
-	const FString NewSessionName = GameState ? GameState->GetSessionName() : FString();
+	const FString NewSessionName = ReadSessionName(GameState);
 	if (NewSessionName == SessionName)
 	{
 		return;

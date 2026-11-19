@@ -7,6 +7,7 @@
 #include "Equipment/FGBuildGun.h"
 #include "Equipment/FGBuildGunBuild.h"
 #include "Equipment/FGBuildGunDismantle.h"
+#include "FicsitGameAccess.h"
 #include "FicsitMilestoneNeeds.h"
 #include "FGInventoryComponent.h"
 #include "FGWorkBench.h"
@@ -16,7 +17,6 @@
 #include "FicsitStatistics.h"
 #include "ItemAmount.h"
 #include "Patching/NativeHookManager.h"
-#include "Resources/FGExtractableResourceInterface.h"
 #include "Resources/FGItemDescriptor.h"
 
 FCriticalSection FFicsitEventCounters::Lock;
@@ -220,13 +220,13 @@ void FFicsitEventCounters::RecordCycleCompleted(AFGBuildableFactory* Factory)
 {
 	if (const AFGBuildableManufacturer* Manufacturer = Cast<AFGBuildableManufacturer>(Factory))
 	{
-		const TSubclassOf<UFGRecipe> RecipeClass = Manufacturer->GetCurrentRecipe();
+		const TSubclassOf<UFGRecipe> RecipeClass = FicsitGame::CurrentRecipe(Manufacturer);
 		if (!RecipeClass)
 		{
 			return;
 		}
 		// Somersloop amplification multiplies the output of each cycle.
-		const float Boost = Manufacturer->GetCurrentProductionBoost();
+		const float Boost = FicsitGame::CurrentProductionBoost(Manufacturer);
 		for (const FItemAmount& Product : RecipeClass.GetDefaultObject()->GetProducts())
 		{
 			Add(true, EFicsitRateSource::Manufacturing, Product.ItemClass.Get(), FicsitUnits::ToDisplayAmount(Product.Amount, Product.ItemClass) * Boost);
@@ -236,20 +236,16 @@ void FFicsitEventCounters::RecordCycleCompleted(AFGBuildableFactory* Factory)
 
 	if (const AFGBuildableResourceExtractor* Extractor = Cast<AFGBuildableResourceExtractor>(Factory))
 	{
-		const TScriptInterface<IFGExtractableResourceInterface> Resource = Extractor->GetExtractableResource();
-		if (Resource.GetInterface())
+		if (const TSubclassOf<UFGItemDescriptor> Item = FicsitGame::ExtractorItem(Extractor))
 		{
-			if (const TSubclassOf<UFGItemDescriptor> Item = Resource.GetInterface()->GetResourceClass())
-			{
-				Add(true, EFicsitRateSource::Extraction, Item.Get(), Extractor->GetNumExtractedItemsPerCycleConverted());
-			}
+			Add(true, EFicsitRateSource::Extraction, Item.Get(), Extractor->GetNumExtractedItemsPerCycleConverted());
 		}
 	}
 }
 
 void FFicsitEventCounters::RecordIngredientsConsumed(AFGBuildableManufacturer* Manufacturer)
 {
-	const TSubclassOf<UFGRecipe> RecipeClass = Manufacturer ? Manufacturer->GetCurrentRecipe() : nullptr;
+	const TSubclassOf<UFGRecipe> RecipeClass = FicsitGame::CurrentRecipe(Manufacturer);
 	if (!RecipeClass)
 	{
 		return;
